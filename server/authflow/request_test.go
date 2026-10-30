@@ -28,6 +28,7 @@ func TestParseAuthorizationRequest(t *testing.T) {
 		clients                []storage.Client
 		supportedResponseTypes []string
 		pkce                   PKCEConfig
+		issuer                 string
 
 		usePOST bool
 
@@ -380,6 +381,27 @@ func TestParseAuthorizationRequest(t *testing.T) {
 				"scope":                 "openid email profile",
 			},
 		},
+		{
+			// The device flow sends redirect_uri = IssuerURL.AbsPath("/device/callback"),
+			// which path.Join-normalizes: a trailing-slash issuer "/dex/" yields
+			// "/dex/device/callback", not "/dex//device/callback". Validation must
+			// accept exactly that normalized form.
+			name: "device flow redirect_uri under a trailing-slash issuer path",
+			clients: []storage.Client{
+				{
+					ID:     "device",
+					Public: true,
+				},
+			},
+			supportedResponseTypes: []string{"code"},
+			issuer:                 "https://auth.example.com/dex/",
+			queryParams: map[string]string{
+				"client_id":     "device",
+				"redirect_uri":  "/dex/device/callback",
+				"response_type": "code",
+				"scope":         "openid email profile",
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -389,6 +411,11 @@ func TestParseAuthorizationRequest(t *testing.T) {
 				c.Storage = storage.WithStaticClients(c.Storage, tc.clients)
 				if len(tc.pkce.CodeChallengeMethodsSupported) > 0 || tc.pkce.Enforce {
 					c.PKCE = tc.pkce
+				}
+				if tc.issuer != "" {
+					issuerURL, err := url.Parse(tc.issuer)
+					require.NoError(t, err)
+					c.IssuerURL = oauth2.IssuerURL{URL: *issuerURL}
 				}
 			})
 			defer httpServer.Close()
@@ -631,9 +658,33 @@ func TestValidRedirectURI(t *testing.T) {
 			redirectURI: "http://localhost.localhost:8080/",
 			wantValid:   false,
 		},
+		// The issuer-prefixed device callback is the device-flow redirect under a
+		// path-prefixed issuer; an arbitrary host ending in /device/callback is not.
+		{
+			client: storage.Client{
+				Public: true,
+			},
+			redirectURI: "/auth/device/callback",
+			wantValid:   true,
+		},
+		{
+			client: storage.Client{
+				Public: true,
+			},
+			redirectURI: "https://evil.com/device/callback",
+			wantValid:   false,
+		},
+		{
+			client: storage.Client{
+				Public:       true,
+				RedirectURIs: []string{"http://foo.com/bar"},
+			},
+			redirectURI: "/auth/device/callback",
+			wantValid:   false,
+		},
 	}
 	for _, test := range tests {
-		got := validateRedirectURI(test.client, test.redirectURI)
+		got := validateRedirectURI(test.client, test.redirectURI, "/auth/device/callback")
 		if got != test.wantValid {
 			t.Errorf("client=%#v, redirectURI=%q, wanted valid=%t, got=%t",
 				test.client, test.redirectURI, test.wantValid, got)
