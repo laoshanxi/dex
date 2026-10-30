@@ -85,7 +85,7 @@ func (h *Handler) redirectWithError(w http.ResponseWriter, r *http.Request, auth
 	err.Handler().ServeHTTP(w, r)
 }
 
-func validateRedirectURI(client storage.Client, redirectURI string) bool {
+func validateRedirectURI(client storage.Client, redirectURI, issuerDeviceCallback string) bool {
 	// Allow named RedirectURIs for both public and non-public clients.
 	// This is required to make PKCE-enabled web apps work when configured as public clients.
 	for _, uri := range client.RedirectURIs {
@@ -98,7 +98,16 @@ func validateRedirectURI(client storage.Client, redirectURI string) bool {
 		return false
 	}
 
-	if redirectURI == oauth2.RedirectURIOOB || redirectURI == oauth2.DeviceCallbackURI {
+	// The device flow (server/device) builds its redirect_uri with
+	// IssuerURL.AbsPath, so a path-prefixed issuer (e.g. "/auth") yields
+	// <issuer path>/device/callback while the comparison below used only the
+	// bare constant — upstream has the same defect and rejects every
+	// path-prefixed deployment with "Unregistered redirect_uri". Accept
+	// exactly the value the generator produces; an arbitrary /device/callback
+	// suffix stays rejected (a hostile host ending in it could capture the
+	// code). Root-issuer deployments behave unchanged.
+	if redirectURI == oauth2.RedirectURIOOB || redirectURI == oauth2.DeviceCallbackURI ||
+		redirectURI == issuerDeviceCallback {
 		return true
 	}
 
@@ -210,7 +219,8 @@ func (h *Handler) parseAuthorizationRequest(r *http.Request) (*storage.AuthReque
 		return nil, "", newDisplayedErr(http.StatusInternalServerError, "Database error.")
 	}
 
-	if !validateRedirectURI(client, redirectURI) {
+	issuerDeviceCallback := h.IssuerURL.AbsPath(oauth2.DeviceCallbackURI)
+	if !validateRedirectURI(client, redirectURI, issuerDeviceCallback) {
 		h.Logger.ErrorContext(ctx, "unregistered redirect_uri", "redirect_uri", redirectURI, "client_id", clientID)
 		return nil, "", newDisplayedErr(http.StatusBadRequest, "Unregistered redirect_uri.")
 	}
