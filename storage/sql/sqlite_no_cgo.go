@@ -1,19 +1,62 @@
 //go:build !cgo
 // +build !cgo
 
-// This is a stub for the no CGO compilation (CGO_ENABLED=0)
+// SQLite storage for CGO-free builds, backed by the pure-Go modernc.org/sqlite
+// driver. Behavior matches the cgo (mattn/go-sqlite3) variant: the same
+// migrations and query flavor run on both.
 
 package sql
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/dexidp/dex/storage"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
-type SQLite3 struct{}
+// SQLite3 options for creating an SQL db.
+type SQLite3 struct {
+	// File to
+	File string `json:"file"`
+}
 
+// Open creates a new storage implementation backed by SQLite3
 func (s *SQLite3) Open(logger *slog.Logger) (storage.Storage, error) {
-	return nil, fmt.Errorf("SQLite storage is not available: binary compiled without CGO support. Recompile with CGO_ENABLED=1 or use a different storage backend.")
+	conn, err := s.open(logger)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (s *SQLite3) open(logger *slog.Logger) (*conn, error) {
+	db, err := sql.Open("sqlite", s.File)
+	if err != nil {
+		return nil, err
+	}
+
+	// always allow only one connection to sqlite3, any other thread/go-routine
+	// attempting concurrent access will have to wait
+	db.SetMaxOpenConns(1)
+	errCheck := func(err error) bool {
+		var sqlErr *sqlite.Error
+		if !errors.As(err, &sqlErr) {
+			return false
+		}
+		// The driver reports the extended result code when it is consistent
+		// with the primary one and falls back to the primary code otherwise.
+		return sqlErr.Code() == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY ||
+			sqlErr.Code() == sqlite3.SQLITE_CONSTRAINT
+	}
+
+	c := &conn{db, &flavorSQLite3, logger, errCheck}
+	if _, err := c.migrate(); err != nil {
+		return nil, fmt.Errorf("failed to perform migrations: %v", err)
+	}
+	return c, nil
 }
