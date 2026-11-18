@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/dexidp/dex/server/authflow"
+	"github.com/dexidp/dex/server/connectors"
 	"github.com/dexidp/dex/server/grants"
 	"github.com/dexidp/dex/server/mfa"
 	"github.com/dexidp/dex/server/oauth2"
@@ -74,6 +75,10 @@ type Config struct {
 
 	// If set, the server will use this connector to handle password grants
 	PasswordConnector string
+
+	// PasswordLockout enables progressive temporary lockout on the local
+	// password connector after repeated failed logins. Nil disables it.
+	PasswordLockout *connectors.PasswordLockoutConfig
 
 	// PKCE configuration
 	PKCE authflow.PKCEConfig

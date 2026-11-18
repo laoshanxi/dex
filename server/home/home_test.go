@@ -1,11 +1,17 @@
 package home
 
 import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/dexidp/dex/server/oauth2"
 	"github.com/dexidp/dex/storage"
 )
 
@@ -82,4 +88,21 @@ func TestTimeFields(t *testing.T) {
 	iso, text = timeFields(time.Time{})
 	assert.Empty(t, iso)
 	assert.Empty(t, text)
+}
+
+// TestHandleInlineSecurityHeaders: the inline fallback page carries the same
+// browser-hardening headers as every other HTML page dex serves.
+func TestHandleInlineSecurityHeaders(t *testing.T) {
+	h := &Handler{
+		IssuerURL: oauth2.IssuerURL{URL: url.URL{Scheme: "https", Host: "dex.example.com", Path: "/dex"}},
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	h.handleInline(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+	assert.Equal(t, "DENY", rec.Header().Get("X-Frame-Options"))
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+	assert.NotEmpty(t, rec.Header().Get("Content-Security-Policy"))
 }

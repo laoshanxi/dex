@@ -10,6 +10,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 
+	"github.com/dexidp/dex/server/grants"
 	"github.com/dexidp/dex/server/internal"
 	"github.com/dexidp/dex/server/oauth2"
 	"github.com/dexidp/dex/server/router"
@@ -163,6 +164,11 @@ func newIntrospectBadRequestError(desc string) *introspectionError {
 
 // Handler serves the OAuth2 token introspection endpoint. It validates refresh
 // tokens with tokens.LookupRefreshToken, the same lookup the refresh grant uses.
+//
+// The endpoint is authenticated like the token endpoint (RFC 7662 §4 requires
+// the introspection endpoint to be protected): HTTP Basic client credentials,
+// a confidential client with a matching secret. Public clients have no secret
+// and are refused — they cannot prove who is asking.
 type Handler struct {
 	Issuer        string
 	Signer        signer.Signer
@@ -248,7 +254,8 @@ func (h *Handler) introspectRefreshToken(ctx context.Context, token string) (*In
 		// only an infrastructure failure is a server error.
 		if errors.Is(err, tokens.ErrRefreshTokenInvalid) ||
 			errors.Is(err, tokens.ErrRefreshTokenExpired) ||
-			errors.Is(err, tokens.ErrRefreshTokenClaimedByOtherClient) {
+			errors.Is(err, tokens.ErrRefreshTokenClaimedByOtherClient) ||
+			errors.Is(err, tokens.ErrRefreshTokenReused) {
 			return nil, newIntrospectInactiveTokenError()
 		}
 		h.Logger.ErrorContext(ctx, "failed to get refresh token", "err", err)
@@ -365,8 +372,64 @@ func (h *Handler) introspectAccessToken(ctx context.Context, token string) (*Int
 	}, nil
 }
 
+// authenticateClient authenticates the caller the way the token endpoint does,
+// through the shared grants.ClientCredentials/grants.AuthenticateClient pair.
+// It also refuses public clients: an empty secret authenticates anyone who
+// knows the client_id, which is not authentication. A refusal is answered with
+// 401, a Basic challenge, and — like an inactive token, per RFC 7662 — an
+// {"active":false} body, so an unauthorized caller learns nothing beyond the
+// refusal itself.
+func (h *Handler) authenticateClient(w http.ResponseWriter, r *http.Request) bool {
+	// ClientCredentials falls back to the form credentials, so the body has to
+	// be parsed before they can be read; ParseForm is idempotent.
+	if err := r.ParseForm(); err != nil {
+		h.writeUnauthorized(w)
+		return false
+	}
+
+	id, secret, oerr := grants.ClientCredentials(r, r.PostForm)
+	if oerr != nil {
+		h.writeUnauthorized(w)
+		return false
+	}
+
+	client, oerr := grants.AuthenticateClient(r.Context(), h.Storage, h.Logger, id, secret)
+	if oerr != nil {
+		// Anything but a server failure is the same refusal; introspection has
+		// no error response of its own to distinguish bad credentials with.
+		if oerr.Status != http.StatusInternalServerError {
+			h.writeUnauthorized(w)
+			return false
+		}
+		oauth2.WriteErrorResponse(h.Logger, w, oerr.Type, oerr.Description, oerr.Status)
+		return false
+	}
+	if client.Secret == "" {
+		h.Logger.InfoContext(r.Context(), "public client cannot authenticate to introspection", "client_id", client.ID)
+		h.writeUnauthorized(w)
+		return false
+	}
+	return true
+}
+
+// writeUnauthorized refuses an unauthenticated introspection call.
+func (h *Handler) writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="dex token introspection"`)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	json.NewEncoder(w).Encode(struct {
+		Active bool `json:"active"`
+	}{Active: false})
+}
+
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	if !h.authenticateClient(w, r) {
+		return
+	}
 
 	var introspect *Introspection
 	token, tokenType, err := h.getTokenFromRequest(r)

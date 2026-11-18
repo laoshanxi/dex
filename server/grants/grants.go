@@ -16,6 +16,7 @@ import (
 	"github.com/dexidp/dex/server/oauth2"
 	"github.com/dexidp/dex/server/router"
 	"github.com/dexidp/dex/server/session"
+	"github.com/dexidp/dex/server/signer"
 	"github.com/dexidp/dex/server/tokens"
 	"github.com/dexidp/dex/storage"
 )
@@ -144,7 +145,8 @@ type ScopePolicy struct {
 // Handler is the /token endpoint. It owns the phases shared by every grant —
 // dispatch by grant_type, client authentication, scope validation, connector
 // resolution and writing the response or error — while each grant carries only
-// its own narrow dependencies. It mounts its own routes (router.Handler).
+// its own narrow dependencies. It mounts its own routes (router.Handler),
+// including the RFC 7009 revocation endpoint beside the token endpoint.
 type Handler struct {
 	Issuer              *tokens.Issuer
 	Storage             storage.Storage
@@ -158,6 +160,12 @@ type Handler struct {
 	SupportedGrantTypes []string
 	IDJAG               *IDJAGConfig
 	IDJAGMetrics        *IDJAGMetrics
+
+	// IssuerURL and Signer serve the revocation endpoint's access-token
+	// verification. Kept beside the grants, since /auth/revoke mounts with
+	// them below.
+	IssuerURL string
+	Signer    signer.Signer
 
 	grants map[string]Grant
 }
@@ -184,6 +192,10 @@ func (h *Handler) Mount(m router.Mux) {
 		&deviceCode{storage: h.Storage, now: h.Now, logger: h.Logger},
 	)
 	m.HandleCORS("/token", h.handleToken)
+	// /auth/revoke must be registered before the login flow's /auth/{connector}
+	// route, or gorilla/mux would match "revoke" as a connector name. Mounting
+	// it here, beside /token, is what guarantees that order.
+	m.HandleCORS("/auth/revoke", h.handleRevoke)
 }
 
 // handleToken serves /token: it validates the request shape and dispatches to the

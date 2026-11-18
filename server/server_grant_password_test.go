@@ -294,3 +294,126 @@ func TestHandlePasswordAllowedConnectors(t *testing.T) {
 		})
 	}
 }
+
+// TestPasswordGrantLockout is the F-1 regression test: five consecutive wrong
+// passwords lock the account (blocked_until on its user identity) and further
+// attempts — including the correct password — are answered with the same
+// generic wrong-password error, so the lock state is not disclosed. The lock
+// escalates with further failures and lifts after it expires.
+func TestPasswordGrantLockout(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Now().UTC()
+	clock := t0
+
+	httpServer, s := newTestServer(t, func(c *Config) {
+		c.PasswordConnector = "local"
+		c.Now = func() time.Time { return clock }
+		c.PasswordLockout = &connectors.PasswordLockoutConfig{
+			Threshold:   5,
+			Duration:    15 * time.Minute,
+			MaxDuration: 24 * time.Hour,
+		}
+	})
+	defer httpServer.Close()
+	seedLocalPasswordDB(t, s)
+
+	makeReq := func(password string) *httptest.ResponseRecorder {
+		u, err := url.Parse(s.issuerURL.String())
+		require.NoError(t, err)
+		u.Path = path.Join(u.Path, "/token")
+
+		v := url.Values{}
+		v.Add("scope", "openid email")
+		v.Add("grant_type", "password")
+		v.Add("username", "user@example.com")
+		v.Add("password", password)
+
+		req, _ := http.NewRequest("POST", u.String(), bytes.NewBufferString(v.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; param=value")
+		req.SetBasicAuth("test", "barfoo")
+
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		return rr
+	}
+	wrongPWBody := func() string {
+		rr := makeReq("definitely-wrong")
+		require.Equal(t, http.StatusUnauthorized, rr.Code)
+		return rr.Body.String()
+	}
+
+	// Below the threshold the correct password still works, and a success clears
+	// the count.
+	for range 4 {
+		wrongPWBody()
+	}
+	rr := makeReq("secret")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// Five consecutive failures lock the account until clock+15m.
+	for range 5 {
+		wrongPWBody()
+	}
+	ui, err := s.storage.GetUserIdentity(ctx, "user-id", "local")
+	require.NoError(t, err, "the lock must persist on the user identity")
+	require.WithinDuration(t, clock.Add(15*time.Minute), ui.BlockedUntil, time.Second)
+
+	// While locked, the correct password gets exactly the wrong-password answer.
+	rr = makeReq("secret")
+	require.Equal(t, http.StatusUnauthorized, rr.Code, "locked account must refuse the correct password")
+	require.Equal(t, wrongPWBody(), rr.Body.String(), "the lock must not be distinguishable from a wrong password")
+
+	// Five more failures while locked escalate the lock to 30 minutes.
+	for range 5 {
+		rr = makeReq("definitely-wrong")
+		require.Equal(t, http.StatusUnauthorized, rr.Code)
+	}
+	ui, err = s.storage.GetUserIdentity(ctx, "user-id", "local")
+	require.NoError(t, err)
+	require.WithinDuration(t, clock.Add(30*time.Minute), ui.BlockedUntil, time.Second)
+
+	// Once the lock has expired the correct password works again and clears the
+	// persisted lock.
+	clock = clock.Add(31 * time.Minute)
+	rr = makeReq("secret")
+	require.Equal(t, http.StatusOK, rr.Code, "expired lock must not outlive blocked_until: %s", rr.Body.String())
+	ui, err = s.storage.GetUserIdentity(ctx, "user-id", "local")
+	require.NoError(t, err)
+	require.True(t, ui.BlockedUntil.IsZero(), "successful login must clear blocked_until")
+}
+
+// TestPasswordGrantLockoutDisabled pins the opt-out: with lockout disabled the
+// wrong password can be presented any number of times and the correct one keeps
+// working immediately after.
+func TestPasswordGrantLockoutDisabled(t *testing.T) {
+	httpServer, s := newTestServer(t, func(c *Config) {
+		c.PasswordConnector = "local"
+	})
+	defer httpServer.Close()
+	seedLocalPasswordDB(t, s)
+
+	u, err := url.Parse(s.issuerURL.String())
+	require.NoError(t, err)
+	u.Path = path.Join(u.Path, "/token")
+
+	do := func(password string) int {
+		v := url.Values{}
+		v.Add("scope", "openid email")
+		v.Add("grant_type", "password")
+		v.Add("username", "user@example.com")
+		v.Add("password", password)
+
+		req, _ := http.NewRequest("POST", u.String(), bytes.NewBufferString(v.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; param=value")
+		req.SetBasicAuth("test", "barfoo")
+
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	for range 8 {
+		require.Equal(t, http.StatusUnauthorized, do("definitely-wrong"))
+	}
+	require.Equal(t, http.StatusOK, do("secret"), "lockout disabled: the correct password must work immediately")
+}

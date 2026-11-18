@@ -12,6 +12,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"golang.org/x/crypto/bcrypt"
@@ -288,10 +289,68 @@ type OAuth2 struct {
 	AlwaysShowLoginScreen bool `json:"alwaysShowLoginScreen"`
 	// This is the connector that can be used for password grant
 	PasswordConnector string `json:"passwordConnector"`
+	// Progressive lockout of the local password connector after repeated
+	// failed logins. Defaults to enabled with threshold 5 and a 15m base
+	// lock; see PasswordLockout for the knobs.
+	PasswordLockout *PasswordLockout `json:"passwordLockout"`
 	// PKCE configuration
 	PKCE PKCE `json:"pkce"`
 	// TokenExchange configuration
 	TokenExchange TokenExchange `json:"tokenExchange"`
+}
+
+// PasswordLockout configures progressive temporary lockout of the local
+// password connector: after Threshold consecutive failed logins the account is
+// refused (with the same generic error as a wrong password) for a lock that
+// doubles every further Threshold failures, capped at MaxDuration. The lock
+// state persists as blocked_until on the user's identity.
+type PasswordLockout struct {
+	// Enabled toggles the lockout. Defaults to true, including when the
+	// passwordLockout section is absent.
+	Enabled *bool `json:"enabled"`
+	// Consecutive failures before the account is locked. Defaults to 5.
+	Threshold int `json:"threshold"`
+	// Lock duration at the threshold, as a Go duration string. Defaults to 15m.
+	Duration string `json:"duration"`
+	// Cap on the escalating lock duration. Defaults to 24h.
+	MaxDuration string `json:"maxDuration"`
+}
+
+// resolve parses the string fields and fills defaults. It reports nil when the
+// lockout is disabled.
+func (pl *PasswordLockout) resolve() (*connectors.PasswordLockoutConfig, error) {
+	if pl == nil {
+		return &connectors.PasswordLockoutConfig{}, nil
+	}
+	if pl.Enabled != nil && !*pl.Enabled {
+		return nil, nil
+	}
+
+	cfg := &connectors.PasswordLockoutConfig{Threshold: pl.Threshold}
+	if pl.Duration != "" {
+		d, err := time.ParseDuration(pl.Duration)
+		if err != nil {
+			return nil, fmt.Errorf("invalid config value %q for password lockout duration: %v", pl.Duration, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("invalid config value %q for password lockout duration: must be positive", pl.Duration)
+		}
+		cfg.Duration = d
+	}
+	if pl.MaxDuration != "" {
+		d, err := time.ParseDuration(pl.MaxDuration)
+		if err != nil {
+			return nil, fmt.Errorf("invalid config value %q for password lockout max duration: %v", pl.MaxDuration, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("invalid config value %q for password lockout max duration: must be positive", pl.MaxDuration)
+		}
+		cfg.MaxDuration = d
+	}
+	if cfg.Threshold < 0 {
+		return nil, fmt.Errorf("invalid config value %d for password lockout threshold: must not be negative", cfg.Threshold)
+	}
+	return cfg, nil
 }
 
 // TokenExchange holds the token exchange (RFC 8693) configuration.

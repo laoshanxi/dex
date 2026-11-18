@@ -318,12 +318,15 @@ func parseRefreshToken(code string) (*internal.RefreshToken, *oauth2.Error) {
 // refreshLookupError maps a tokens.LookupRefreshToken sentinel to the grant's
 // OAuth2 error response. A rejected token is invalid_grant: RFC 6749 section 5.2
 // uses it for a refresh token that is "invalid, expired, revoked ... or was
-// issued to another client", and clients rely on it to start a new login.
+// issued to another client", and clients rely on it to start a new login. A
+// replayed token is answered with the same generic description as any other
+// claimed token: telling the presenter its replay was detected buys nothing.
 // https://datatracker.ietf.org/doc/html/rfc6749#section-5.2
 func refreshLookupError(err error) *oauth2.Error {
 	const claimedDesc = "Refresh token is invalid or has already been claimed by another client."
 	switch {
-	case errors.Is(err, tokens.ErrRefreshTokenInvalid), errors.Is(err, tokens.ErrRefreshTokenClaimedByOtherClient):
+	case errors.Is(err, tokens.ErrRefreshTokenInvalid), errors.Is(err, tokens.ErrRefreshTokenClaimedByOtherClient),
+		errors.Is(err, tokens.ErrRefreshTokenReused):
 		return &oauth2.Error{Type: oauth2.InvalidGrant, Description: claimedDesc, Status: http.StatusBadRequest}
 	case errors.Is(err, tokens.ErrRefreshTokenExpired):
 		return &oauth2.Error{Type: oauth2.InvalidGrant, Description: "Refresh token expired.", Status: http.StatusBadRequest}

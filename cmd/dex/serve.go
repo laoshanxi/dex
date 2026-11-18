@@ -49,6 +49,7 @@ import (
 	"github.com/dexidp/dex/server/signer"
 	"github.com/dexidp/dex/server/tokens"
 	"github.com/dexidp/dex/storage"
+	"github.com/dexidp/dex/version"
 )
 
 type serveOptions struct {
@@ -126,7 +127,7 @@ func runServe(options serveOptions) error {
 
 	logger.Info(
 		"Version info",
-		"dex_version", version,
+		"dex_version", version.Version,
 		slog.Group("go",
 			"version", runtime.Version(),
 			"os", runtime.GOOS,
@@ -381,12 +382,30 @@ func runServe(options serveOptions) error {
 		return fmt.Errorf("unknown signer type %q", c.Signer.Type)
 	}
 
+	passwordLockout, err := c.OAuth2.PasswordLockout.resolve()
+	if err != nil {
+		return fmt.Errorf("invalid password lockout config: %v", err)
+	}
+	if passwordLockout != nil {
+		// Log the resolved values; the resolver applies the same defaults
+		// again before use.
+		d := passwordLockout.WithDefaults()
+		logger.Info("config password lockout",
+			"threshold", d.Threshold,
+			"duration", d.Duration,
+			"max_duration", d.MaxDuration,
+		)
+	} else {
+		logger.Info("config password lockout disabled")
+	}
+
 	serverConfig := server.Config{
 		AllowedGrantTypes:      c.OAuth2.GrantTypes,
 		SupportedResponseTypes: c.OAuth2.ResponseTypes,
 		SkipApprovalScreen:     c.OAuth2.SkipApprovalScreen,
 		AlwaysShowLoginScreen:  c.OAuth2.AlwaysShowLoginScreen,
 		PasswordConnector:      c.OAuth2.PasswordConnector,
+		PasswordLockout:        passwordLockout,
 		PKCE: authflow.PKCEConfig{
 			Enforce:                       c.OAuth2.PKCE.Enforce,
 			CodeChallengeMethodsSupported: c.OAuth2.PKCE.CodeChallengeMethodsSupported,
@@ -641,7 +660,7 @@ func runServe(options serveOptions) error {
 		}
 
 		grpcSrv := grpc.NewServer(grpcOptions...)
-		api.RegisterDexServer(grpcSrv, apiserver.NewAPI(serverConfig.Storage, logger, version, serv.Connectors(), serv.Discovery(), serv.Backchannel()))
+		api.RegisterDexServer(grpcSrv, apiserver.NewAPI(serverConfig.Storage, logger, version.Version, serv.Connectors(), serv.Discovery(), serv.Backchannel()))
 
 		grpcMetrics.InitializeMetrics(grpcSrv)
 		if c.GRPC.Reflection {
@@ -883,7 +902,7 @@ func loadTLSConfig(certFile, keyFile, caFile string, baseConfig *tls.Config) (*t
 
 // recordBuildInfo publishes information about Dex version and runtime info through an info metric (gauge).
 func recordBuildInfo() {
-	buildInfo.WithLabelValues(version, runtime.Version(), fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)).Set(1)
+	buildInfo.WithLabelValues(version.Version, runtime.Version(), fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)).Set(1)
 }
 
 func parseSessionConfig(s *Sessions) (*session.Config, error) {

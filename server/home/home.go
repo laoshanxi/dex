@@ -101,6 +101,7 @@ func sessionExpiry(s *storage.AuthSession) (time.Time, bool) {
 }
 
 func (h *Handler) handleInline(w http.ResponseWriter, r *http.Request) {
+	templates.SetSecurityHeaders(w, "")
 	_, err := fmt.Fprintf(w, `<!DOCTYPE html>
 		<title>Dex</title>
 		<h1>Dex IdP</h1>

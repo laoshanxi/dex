@@ -16,6 +16,7 @@ import (
 	"github.com/dexidp/dex/connector"
 	"github.com/dexidp/dex/server/connectors"
 	"github.com/dexidp/dex/server/oauth2"
+	"github.com/dexidp/dex/server/templates"
 	"github.com/dexidp/dex/server/tokens"
 	"github.com/dexidp/dex/storage"
 )
@@ -206,23 +207,8 @@ func (h *Handler) handleConnectorLogin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// TODO(ericchiang): Don't inline this.
-			fmt.Fprintf(w, `<!DOCTYPE html>
-			  <html lang="en">
-			  <head>
-			    <meta http-equiv="content-type" content="text/html; charset=utf-8">
-			    <title>SAML login</title>
-			  </head>
-			  <body>
-			    <form method="post" action="%s" >
-				    <input type="hidden" name="SAMLRequest" value="%s" />
-				    <input type="hidden" name="RelayState" value="%s" />
-			    </form>
-				<script>
-				    document.forms[0].submit();
-				</script>
-			  </body>
-			  </html>`, action, value, authReq.ID)
+			templates.SetSecurityHeaders(w, samlRelayContentSecurityPolicy)
+			fmt.Fprintf(w, samlRelayPage, action, value, authReq.ID)
 		default:
 			h.renderError(r, w, http.StatusBadRequest, "Requested resource does not exist.")
 		}
@@ -230,3 +216,28 @@ func (h *Handler) handleConnectorLogin(w http.ResponseWriter, r *http.Request) {
 		h.renderError(r, w, http.StatusBadRequest, "Unsupported request method.")
 	}
 }
+
+// samlRelayPage is the transient auto-post page the SAML POST binding relays
+// through: the browser itself must submit the form to the IdP.
+const samlRelayPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <title>SAML login</title>
+</head>
+<body>
+    <form method="post" action="%s">
+        <input type="hidden" name="SAMLRequest" value="%s"/>
+        <input type="hidden" name="RelayState" value="%s"/>
+    </form>
+    <script>
+        document.forms[0].submit();
+    </script>
+</body>
+</html>`
+
+// samlRelayContentSecurityPolicy is the relay page's own policy. Unlike every
+// other dex page it cannot pin form-action: the form targets the
+// operator-configured IdP, which is cross-origin by design. Its auto-submit
+// script is pinned by hash like the template scripts.
+const samlRelayContentSecurityPolicy = `default-src 'self'; script-src 'sha256-HdxQyL07OTOBHJ0uJMVI/zySIjdTRefIZGlswnjxwwY='; frame-ancestors 'none'; base-uri 'none'; object-src 'none'`

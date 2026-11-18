@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/dexidp/dex/connector"
 	"github.com/dexidp/dex/storage"
@@ -24,9 +26,30 @@ type ConnectorConfig interface {
 // package need not import any connector implementation — a library consumer can
 // pass its own set of connectors.
 func Resolver(store storage.Storage, logger *slog.Logger, configs map[string]func() ConnectorConfig) ResolveFunc {
+	return ResolverWithPasswordLockout(store, logger, configs, nil, nil)
+}
+
+// ResolverWithPasswordLockout is Resolver serving the local password DB with
+// progressive lockout: a non-nil lockout config makes every open of the local
+// connector share one failure counter and persist blocked_until on the user
+// identity keyed by the connector's own ID. now defaults to time.Now.
+func ResolverWithPasswordLockout(store storage.Storage, logger *slog.Logger, configs map[string]func() ConnectorConfig, lockoutCfg *PasswordLockoutConfig, now func() time.Time) ResolveFunc {
+	var (
+		once    sync.Once
+		lockout *passwordLockout
+	)
 	return func(conn storage.Connector) (connector.Connector, error) {
 		if conn.Type == LocalConnector {
-			return NewPasswordDB(store), nil
+			// One lockout for every open of the connector (cache refreshes
+			// included) so they share failure state. Dex has a single local
+			// connector, so the first open fixes the connector ID that lock
+			// state is keyed by.
+			once.Do(func() {
+				if lockoutCfg != nil {
+					lockout = newPasswordLockout(store, *lockoutCfg, conn.ID, logger, now)
+				}
+			})
+			return passwordDB{s: store, lockout: lockout}, nil
 		}
 		return openConnector(logger, configs, conn)
 	}

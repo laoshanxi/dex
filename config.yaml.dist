@@ -133,6 +133,17 @@ web:
 #   # Uncomment to use a specific connector for password grants
 #   passwordConnector: local
 #
+#   # Progressive lockout of the local password connector: after threshold
+#   # consecutive failed logins the account is refused (with the same generic
+#   # error as a wrong password) for a lock that doubles every further
+#   # threshold failures, capped at maxDuration. The lock persists as
+#   # blocked_until on the user's identity. Enabled with defaults when absent.
+#   passwordLockout:
+#     enabled: true # set false to disable
+#     threshold: 5 # consecutive failures before the account is locked
+#     duration: 15m # lock duration at the threshold
+#     maxDuration: 24h # cap on the escalating lock duration
+#
 #   # PKCE (Proof Key for Code Exchange) configuration
 #   pkce:
 #     # If true, PKCE is required for all authorization code flows (OAuth 2.1).

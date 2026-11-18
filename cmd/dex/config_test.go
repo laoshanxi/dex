@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghodss/yaml"
 	"github.com/go-jose/go-jose/v4"
@@ -15,6 +16,7 @@ import (
 	"github.com/dexidp/dex/connector/mock"
 	"github.com/dexidp/dex/connector/oidc"
 	"github.com/dexidp/dex/server"
+	"github.com/dexidp/dex/server/connectors"
 	"github.com/dexidp/dex/server/oauth2"
 	"github.com/dexidp/dex/server/signer"
 	"github.com/dexidp/dex/storage"
@@ -790,6 +792,61 @@ enablePasswordDB: true
 					t.Errorf("check failed: %v", err)
 				}
 			}
+		})
+	}
+}
+
+func TestPasswordLockoutResolve(t *testing.T) {
+	enabled := true
+	disabled := false
+
+	tests := []struct {
+		name    string
+		in      *PasswordLockout
+		want    *connectors.PasswordLockoutConfig
+		wantErr string
+	}{
+		{
+			name: "absent section defaults to enabled with defaults",
+			in:   nil,
+			want: &connectors.PasswordLockoutConfig{},
+		},
+		{
+			name: "empty section defaults to enabled with defaults",
+			in:   &PasswordLockout{},
+			want: &connectors.PasswordLockoutConfig{},
+		},
+		{
+			name: "explicitly disabled",
+			in:   &PasswordLockout{Enabled: &disabled},
+			want: nil,
+		},
+		{
+			name: "custom values",
+			in:   &PasswordLockout{Enabled: &enabled, Threshold: 3, Duration: "5m", MaxDuration: "1h"},
+			want: &connectors.PasswordLockoutConfig{Threshold: 3, Duration: 5 * time.Minute, MaxDuration: time.Hour},
+		},
+		{
+			name:    "invalid duration",
+			in:      &PasswordLockout{Duration: "fast"},
+			wantErr: "invalid config value",
+		},
+		{
+			name:    "negative threshold",
+			in:      &PasswordLockout{Threshold: -1},
+			wantErr: "must not be negative",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.in.resolve()
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
 		})
 	}
 }

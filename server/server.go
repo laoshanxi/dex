@@ -113,7 +113,7 @@ func newServer(ctx context.Context, c Config) (*Server, error) {
 			s.issuer.TypedAccessTokenClients[clientID] = true
 		}
 	}
-	s.connectors = connectors.NewCache(s.storage, connectors.Resolver(s.storage, s.logger, ConnectorsConfig))
+	s.connectors = connectors.NewCache(s.storage, connectors.ResolverWithPasswordLockout(s.storage, s.logger, ConnectorsConfig, c.PasswordLockout, rc.now))
 	s.backchannel = &backchannel.Notifier{
 		Storage:   s.storage,
 		Signer:    c.Signer,
@@ -279,6 +279,8 @@ func (s *Server) mount(routes router.Mux, c Config, rc resolvedConfig) {
 			SupportedGrantTypes: rc.grantTypes,
 			IDJAG:               c.IDJAG,
 			IDJAGMetrics:        idJAGMetrics(c),
+			IssuerURL:           s.issuerURL.String(),
+			Signer:              c.Signer,
 		},
 		&userinfo.Handler{
 			Issuer: s.issuerURL.String(),

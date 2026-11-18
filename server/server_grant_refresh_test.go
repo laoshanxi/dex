@@ -1000,6 +1000,104 @@ func TestRefreshGrantPasswordFlowWithSessions(t *testing.T) {
 	require.Equal(t, "user@example.com", claims["email"])
 }
 
+// TestRefreshTokenReplayRevokesFamily is the reuse-detection regression test:
+// after a rotation retires a refresh token value, replaying that value once the
+// reuse window has closed must fail and must revoke the whole family, so the
+// current token the legitimate client holds is dead too (OAuth BCP reuse
+// detection). The zero-window variant covers the default policy, where the
+// window never opens in the first place.
+func TestRefreshTokenReplayRevokesFamily(t *testing.T) {
+	tests := []struct {
+		name        string
+		reuseWindow time.Duration
+		replayAfter time.Duration // clock advance before the replay, past the window
+	}{
+		{"no reuse window (default policy)", 0, 0},
+		{"reuse window elapsed", time.Second, 2 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t0 := time.Now().UTC()
+			clock := t0
+			httpServer, s := newTestServer(t, func(c *Config) {
+				c.PasswordConnector = "local"
+				c.Now = func() time.Time { return clock }
+				c.RefreshTokenPolicy = tokens.NewRefreshStrategy(true, 0, 0, tc.reuseWindow, func() time.Time { return clock })
+			})
+			defer httpServer.Close()
+			seedLocalPasswordDB(t, s)
+
+			first := doPasswordGrant(t, s)
+
+			// Advance past the window so the first refresh rotates rather than
+			// reusing (with a zero window any advance, including none, does).
+			clock = t0.Add(tc.replayAfter)
+			rr := doRefreshGrant(t, s, first, 0)
+			require.Equal(t, http.StatusOK, rr.Code, "rotation failed: %s", rr.Body.String())
+			var rotated tokenResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rotated))
+			require.NotEqual(t, first, rotated.RefreshToken, "refresh token was not rotated")
+
+			// The window anchors on the rotation, so let it elapse before the
+			// replay lands.
+			clock = clock.Add(tc.replayAfter)
+
+			// Replay the retired value: refused, and the refusal is the generic
+			// invalid_grant clients already handle.
+			rr = doRefreshGrant(t, s, first, 0)
+			require.Equal(t, http.StatusBadRequest, rr.Code, "replayed token must be rejected: %s", rr.Body.String())
+			require.Contains(t, rr.Body.String(), "invalid_grant")
+
+			// The family is revoked: the current token no longer works either.
+			rr = doRefreshGrant(t, s, rotated.RefreshToken, 0)
+			require.Equal(t, http.StatusBadRequest, rr.Code, "current token must be revoked with the family: %s", rr.Body.String())
+			require.Contains(t, rr.Body.String(), "invalid_grant")
+
+			// And the row is gone from storage, not just refused in passing.
+			var tok internal.RefreshToken
+			require.NoError(t, internal.Unmarshal(first, &tok))
+			_, err := s.storage.GetRefresh(t.Context(), tok.RefreshId)
+			require.ErrorIs(t, err, storage.ErrNotFound)
+		})
+	}
+}
+
+// TestRefreshTokenReplayInsideReuseWindowKeepsChain pins the grace the window
+// exists for: replaying the retired value while the window is still open hands
+// back the current token and revokes nothing, so a client that lost the rotated
+// token between refresh and persist keeps its login chain.
+func TestRefreshTokenReplayInsideReuseWindowKeepsChain(t *testing.T) {
+	t0 := time.Now().UTC()
+	clock := t0
+	httpServer, s := newTestServer(t, func(c *Config) {
+		c.PasswordConnector = "local"
+		c.Now = func() time.Time { return clock }
+		c.RefreshTokenPolicy = tokens.NewRefreshStrategy(true, 0, 0, time.Hour, func() time.Time { return clock })
+	})
+	defer httpServer.Close()
+	seedLocalPasswordDB(t, s)
+
+	first := doPasswordGrant(t, s)
+
+	// First refresh rotates (the token was issued before the window started).
+	clock = t0.Add(2 * time.Second)
+	rr := doRefreshGrant(t, s, first, 0)
+	require.Equal(t, http.StatusOK, rr.Code, "rotation failed: %s", rr.Body.String())
+	var rotated tokenResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rotated))
+
+	// The retired value, replayed inside the window, is answered with the
+	// current token: same value, still a working chain.
+	rr = doRefreshGrant(t, s, first, 0)
+	require.Equal(t, http.StatusOK, rr.Code, "reuse inside the window must succeed: %s", rr.Body.String())
+	var resent tokenResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resent))
+	require.Equal(t, rotated.RefreshToken, resent.RefreshToken, "reuse inside the window must return the current token")
+
+	rr = doRefreshGrant(t, s, rotated.RefreshToken, 0)
+	require.Equal(t, http.StatusOK, rr.Code, "the current token must still work: %s", rr.Body.String())
+}
+
 func TestRefreshDoesNotLogConnectorData(t *testing.T) {
 	const upstreamToken = "upstream-refresh-token-must-not-be-logged"
 

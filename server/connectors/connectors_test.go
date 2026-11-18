@@ -125,7 +125,7 @@ func TestSetCachedCloseLen(t *testing.T) {
 // the refresh with ErrUserRevoked, which the refresh grant answers with invalid_grant.
 func TestPasswordDBRefreshUserRevoked(t *testing.T) {
 	store := memory.New(slog.New(slog.DiscardHandler))
-	db := passwordDB{store}
+	db := passwordDB{s: store}
 	ctx := t.Context()
 
 	_, err := db.Refresh(ctx, connector.Scopes{}, connector.Identity{UserID: "old", Email: "jane@example.com"})

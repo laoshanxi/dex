@@ -18,6 +18,7 @@ var (
 	ErrRefreshTokenInvalid              = errors.New("refresh token is invalid or has already been claimed")
 	ErrRefreshTokenExpired              = errors.New("refresh token expired")
 	ErrRefreshTokenClaimedByOtherClient = errors.New("refresh token claimed by another client")
+	ErrRefreshTokenReused               = errors.New("refresh token reuse detected")
 )
 
 // LookupRefreshToken validates a refresh token against storage: it exists,
@@ -26,6 +27,11 @@ var (
 // token, or a wrapped storage error for infrastructure failures. Both the
 // refresh grant and token introspection use it, so the validation lives in one
 // place.
+//
+// A retired value (ObsoleteToken) presented after the reuse window is a
+// replay: the whole token family is revoked (RevokeRefreshTokenFamily) before
+// ErrRefreshTokenReused is returned. Within the window it still hands back the
+// current token, the grace a client killed between refresh and persist needs.
 func LookupRefreshToken(ctx context.Context, s storage.Storage, strategy *RefreshStrategy, logger *slog.Logger, clientID *string, token *internal.RefreshToken) (*storage.RefreshToken, error) {
 	refresh, err := s.GetRefresh(ctx, token.RefreshId)
 	if err != nil {
@@ -50,12 +56,21 @@ func LookupRefreshToken(ctx context.Context, s storage.Storage, strategy *Refres
 	// path unauthenticated, so a byte-by-byte '!=' would leak the secret via
 	// timing. Matches the client-secret/nonce comparisons elsewhere in the server.
 	if subtle.ConstantTimeCompare([]byte(refresh.Token), []byte(token.Token)) != 1 {
+		obsolete := refresh.ObsoleteToken != "" &&
+			subtle.ConstantTimeCompare([]byte(refresh.ObsoleteToken), []byte(token.Token)) == 1
 		switch {
-		case !strategy.AllowedToReuse(refresh.LastUsed):
-			fallthrough
-		case subtle.ConstantTimeCompare([]byte(refresh.ObsoleteToken), []byte(token.Token)) != 1:
-			fallthrough
-		case refresh.ObsoleteToken == "":
+		case obsolete && strategy.AllowedToReuse(refresh.LastUsed):
+			// The value the last rotation retired, presented within the reuse
+			// window: tolerated, Rotate hands back the current token.
+		case obsolete:
+			// The same retired value after the window closed can only be a
+			// replay. Kill the family: the row holds every descendant of the
+			// originally issued token, current value included.
+			logger.WarnContext(ctx, "refresh token reuse detected, revoking token family",
+				"token_id", refresh.ID, "client_id", refresh.ClientID, "user_id", refresh.Claims.UserID)
+			RevokeRefreshTokenFamily(ctx, s, logger, &refresh)
+			return nil, ErrRefreshTokenReused
+		default:
 			logger.ErrorContext(ctx, "refresh token claimed twice", "token_id", refresh.ID)
 			return nil, ErrRefreshTokenInvalid
 		}

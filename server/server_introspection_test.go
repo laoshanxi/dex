@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -243,6 +244,8 @@ func TestHandleIntrospect(t *testing.T) {
 
 			req, _ := http.NewRequest("POST", u.String(), bytes.NewBufferString(data.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			// The endpoint is client-authenticated like the token endpoint.
+			req.SetBasicAuth("test", "barfoo")
 
 			rr := httptest.NewRecorder()
 			s.ServeHTTP(rr, req)
@@ -286,6 +289,14 @@ func TestHandleIntrospectAccessTokenDeletedClient(t *testing.T) {
 	// a valid JWT, but its client can no longer be resolved from storage.
 	require.NoError(t, s.storage.DeleteClient(ctx, "test"))
 
+	// Introspection is authenticated, so the caller needs a client of its own:
+	// the token's client is gone and can no longer prove who it is.
+	require.NoError(t, s.storage.CreateClient(ctx, storage.Client{
+		ID:           "introspector",
+		Secret:       "introspector-secret",
+		RedirectURIs: []string{"foo://bar.com/"},
+	}))
+
 	data := url.Values{}
 	data.Set("token", accessToken)
 
@@ -295,6 +306,7 @@ func TestHandleIntrospectAccessTokenDeletedClient(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", u.String(), bytes.NewBufferString(data.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("introspector", "introspector-secret")
 
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -321,6 +333,7 @@ func TestHandleIntrospectRefreshTokenWithoutAbsoluteLifetime(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, s.issuerURL.JoinPath("token", "introspect").String(), bytes.NewBufferString(data.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("test", "barfoo")
 
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -375,6 +388,7 @@ func TestHandleIntrospectTypedAccessToken(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", u.String(), bytes.NewBufferString(data.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("test", "barfoo")
 
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -384,4 +398,61 @@ func TestHandleIntrospectTypedAccessToken(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.Equal(t, true, resp["active"], "body: %s", rr.Body.String())
 	require.Equal(t, "access_token", resp["token_use"])
+}
+
+// TestIntrospectionRequiresClientAuth: RFC 7662 §4 requires the endpoint to be
+// protected. No credentials, wrong credentials, and public clients (no secret
+// to authenticate with) are all refused the same way — 401, a Basic challenge,
+// and an inactive body — while a confidential client with the right secret
+// introspects normally.
+func TestIntrospectionRequiresClientAuth(t *testing.T) {
+	httpServer, s := newTestServer(t, nil)
+	defer httpServer.Close()
+
+	mockTestStorage(t, s.storage)
+
+	// A public client: known, but with no secret to its name.
+	require.NoError(t, s.storage.CreateClient(t.Context(), storage.Client{
+		ID:           "public",
+		RedirectURIs: []string{"foo://bar.com/"},
+	}))
+
+	refreshToken, err := internal.Marshal(&internal.RefreshToken{RefreshId: "test", Token: "bar"})
+	require.NoError(t, err)
+
+	introspect := func(t *testing.T, user, pass string) *httptest.ResponseRecorder {
+		t.Helper()
+		data := url.Values{}
+		data.Set("token", refreshToken)
+		req := httptest.NewRequest(http.MethodPost, s.issuerURL.JoinPath("token", "introspect").String(), strings.NewReader(data.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if user != "" || pass != "" {
+			req.SetBasicAuth(user, pass)
+		}
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		return rr
+	}
+
+	for name, tc := range map[string]struct{ user, pass string }{
+		"no credentials":         {"", ""},
+		"unknown client":         {"nobody", "barfoo"},
+		"wrong secret":           {"test", "wrong"},
+		"public client":          {"public", ""},
+		"public client, secret?": {"public", "guess"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rr := introspect(t, tc.user, tc.pass)
+			require.Equal(t, http.StatusUnauthorized, rr.Code)
+			require.Equal(t, `Basic realm="dex token introspection"`, rr.Header().Get("WWW-Authenticate"))
+			require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+			require.JSONEq(t, `{"active":false}`, rr.Body.String())
+		})
+	}
+
+	rr := introspect(t, "test", "barfoo")
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, true, resp["active"])
 }

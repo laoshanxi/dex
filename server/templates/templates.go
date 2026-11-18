@@ -17,6 +17,56 @@ import (
 	"github.com/Masterminds/sprig/v3"
 )
 
+// contentSecurityPolicy is the default policy for every HTML page dex renders.
+//
+// Scripts are admitted only by hash, taken of the RENDERED script — Go's
+// html/template strips JS comments while executing a template, so a hash of
+// the template file itself would not match what the browser sees (this is
+// pinned by test). The pinned scripts are the login page's double-submit
+// guard, the home page's cosmetic script, and both renderings of the WebAuthn
+// page (its template interpolates the mode into the script body, so it hashes
+// once per mode). 'unsafe-hashes' is required to admit an event-handler
+// attribute by hash — the WebAuthn button's onclick, also pinned — not to
+// allow arbitrary inline code. Styles remain 'unsafe-inline': the pages carry
+// a few one-off style attributes and a custom theme may add more, and with
+// scripts pinned an injected style has no script to exfiltrate with. The TOTP
+// QR code is an inline data: image. Every form the pages carry posts to this
+// origin.
+const contentSecurityPolicy = `default-src 'self'; ` +
+	`script-src 'self' 'unsafe-hashes' ` +
+	`sha256-8L66wXkInDnVEdLxlrsFPaRkqIpBKhVd5kdLxX6AvFk= ` + // password.html: double-submit guard
+	`sha256-5QC12jcJ2qSvtIn2n6IYhr3QnSI4h442g7D6jo7gTCg= ` + // home.html
+	`sha256-rUmI502fe3WlNC775WDZ4Th8Q8osA4V8+3dvsvNDG0E= ` + // webauthn_verify.html, register mode
+	`sha256-gWMavHXdBk6Mc0OF2l0aSmqxBzjbsQXp7WDwp5SRLGw= ` + // webauthn_verify.html, login mode
+	`sha256-Bo+ax59ifGwX4wU5CQffhIR21rzQ1Tuoz9tLQ6o7taU=; ` + // onclick="startWebAuthn()"
+	`style-src 'self' 'unsafe-inline'; ` +
+	`img-src 'self' data:; ` +
+	`frame-ancestors 'none'; ` +
+	`base-uri 'none'; ` +
+	`object-src 'none'; ` +
+	`form-action 'self'`
+
+// SetSecurityHeaders sets the browser-hardening headers every HTML page dex
+// serves carries: no MIME sniffing, no framing, no caching of credential-bearing
+// pages, and the given Content-Security-Policy (the package default when empty).
+// Headers already present are left alone, so a value an operator set through the
+// router's response headers wins over the default.
+func SetSecurityHeaders(w http.ResponseWriter, csp string) {
+	if csp == "" {
+		csp = contentSecurityPolicy
+	}
+	h := w.Header()
+	setDefault := func(name, value string) {
+		if h.Get(name) == "" {
+			h.Set(name, value)
+		}
+	}
+	setDefault("X-Content-Type-Options", "nosniff")
+	setDefault("X-Frame-Options", "DENY")
+	setDefault("Cache-Control", "no-store")
+	setDefault("Content-Security-Policy", csp)
+}
+
 const (
 	tmplApproval       = "approval.html"
 	tmplLogin          = "login.html"
@@ -461,6 +511,7 @@ func RenderError(t *Templates, logger *slog.Logger, r *http.Request, w http.Resp
 }
 
 func (t *Templates) Err(r *http.Request, w http.ResponseWriter, errCode int, errMsg string) error {
+	SetSecurityHeaders(w, "")
 	w.WriteHeader(errCode)
 	data := struct {
 		ErrType string
@@ -485,6 +536,7 @@ func (w *writeRecorder) Write(p []byte) (n int, err error) {
 }
 
 func renderTemplate(w http.ResponseWriter, tmpl *template.Template, data interface{}) error {
+	SetSecurityHeaders(w, "")
 	wr := &writeRecorder{w: w}
 	if err := tmpl.Execute(wr, data); err != nil {
 		if !wr.wrote {

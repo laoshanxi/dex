@@ -69,6 +69,11 @@ type Server struct {
 	renderer Renderer
 	sessions *session.Store
 	admin    *adminClient
+
+	// dexuser authenticates the administration surface (session cookie or
+	// bearer token). nil when APP_MESH_DEXUSER_ISSUER is unset, in which case
+	// every administration route fails closed.
+	dexuser *dexuserAuth
 }
 
 // New creates a Server by performing OIDC discovery and initializing dependencies.
@@ -141,6 +146,18 @@ func New(opts Options) (*Server, error) {
 			return nil, err
 		}
 		s.admin = admin
+	}
+
+	// The dexuser administration authentication, from the environment contract
+	// with the App Mesh launcher. Unset means the administration routes stay
+	// disabled — an authentication-less admin console is what this exists to
+	// prevent.
+	s.dexuser = newDexuserAuth(client)
+	if s.dexuser != nil {
+		log.Printf("dexuser: administration authentication enabled (issuer %s, audience %s, session ttl %s)",
+			s.dexuser.issuer, s.dexuser.audience, s.dexuser.ttl)
+	} else {
+		log.Printf("dexuser: %s is unset; the administration routes answer 401", envDexuserIssuer)
 	}
 
 	return s, nil
@@ -235,33 +252,45 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /tools/verify", s.handleVerify)
 	mux.HandleFunc("POST /userinfo", s.handleUserInfo)
 
+	// The dexuser administration surface: POST /session exchanges the App Mesh
+	// engine's bearer token for a session cookie, DELETE /session logs it out,
+	// and every route under /admin sits behind the gate (cookie or bearer).
+	// The OAuth demo flows above stay open — they are the example this app
+	// exists for.
+	mux.HandleFunc("POST /session", s.handleDexuserSession)
+	mux.HandleFunc("DELETE /session", s.handleDexuserLogout)
+
+	admin := http.NewServeMux()
 	// The page is always served; without a gRPC address it says what to pass to
 	// get the rest of it.
-	mux.HandleFunc("GET /admin", s.handleAdmin)
+	admin.HandleFunc("GET /admin", s.handleAdmin)
 	if s.admin != nil {
-		mux.HandleFunc("POST /admin/client/create", s.handleAdminCreateClient)
-		mux.HandleFunc("POST /admin/client/update", s.handleAdminUpdateClient)
-		mux.HandleFunc("POST /admin/client/delete", s.handleAdminDeleteClient)
-		mux.HandleFunc("POST /admin/password/create", s.handleAdminCreatePassword)
-		mux.HandleFunc("POST /admin/password/update", s.handleAdminUpdatePassword)
-		mux.HandleFunc("POST /admin/password/verify", s.handleAdminVerifyPassword)
-		mux.HandleFunc("POST /admin/password/delete", s.handleAdminDeletePassword)
-		mux.HandleFunc("POST /admin/connector/create", s.handleAdminCreateConnector)
-		mux.HandleFunc("POST /admin/connector/delete", s.handleAdminDeleteConnector)
-		mux.HandleFunc("POST /admin/identity/delete", s.handleAdminDeleteIdentity)
-		mux.HandleFunc("POST /admin/session/delete", s.handleAdminDeleteSession)
-		mux.HandleFunc("POST /admin/session/terminate", s.handleAdminTerminateSessions)
-		mux.HandleFunc("POST /admin/session/terminate-connector", s.handleAdminTerminateByConnector)
-		mux.HandleFunc("GET /admin/client/{id}", s.handleAdminClientDetail)
-		mux.HandleFunc("GET /admin/connector/{id}", s.handleAdminConnectorDetail)
-		mux.HandleFunc("GET /admin/user/{connector}/{user}", s.handleAdminUserDetail)
-		mux.HandleFunc("POST /admin/connector/update", s.handleAdminUpdateConnector)
-		mux.HandleFunc("POST /admin/consent/revoke", s.handleAdminRevokeConsent)
-		mux.HandleFunc("POST /admin/webauthn/delete", s.handleAdminDeleteWebAuthn)
-		mux.HandleFunc("POST /admin/mfa/reset", s.handleAdminResetMFA)
-		mux.HandleFunc("POST /admin/mfa/secret/delete", s.handleAdminDeleteMFASecret)
-		mux.HandleFunc("POST /admin/refresh/revoke", s.handleAdminRevokeRefresh)
+		admin.HandleFunc("POST /admin/client/create", s.handleAdminCreateClient)
+		admin.HandleFunc("POST /admin/client/update", s.handleAdminUpdateClient)
+		admin.HandleFunc("POST /admin/client/delete", s.handleAdminDeleteClient)
+		admin.HandleFunc("POST /admin/password/create", s.handleAdminCreatePassword)
+		admin.HandleFunc("POST /admin/password/update", s.handleAdminUpdatePassword)
+		admin.HandleFunc("POST /admin/password/verify", s.handleAdminVerifyPassword)
+		admin.HandleFunc("POST /admin/password/delete", s.handleAdminDeletePassword)
+		admin.HandleFunc("POST /admin/connector/create", s.handleAdminCreateConnector)
+		admin.HandleFunc("POST /admin/connector/delete", s.handleAdminDeleteConnector)
+		admin.HandleFunc("POST /admin/identity/delete", s.handleAdminDeleteIdentity)
+		admin.HandleFunc("POST /admin/session/delete", s.handleAdminDeleteSession)
+		admin.HandleFunc("POST /admin/session/terminate", s.handleAdminTerminateSessions)
+		admin.HandleFunc("POST /admin/session/terminate-connector", s.handleAdminTerminateByConnector)
+		admin.HandleFunc("GET /admin/client/{id}", s.handleAdminClientDetail)
+		admin.HandleFunc("GET /admin/connector/{id}", s.handleAdminConnectorDetail)
+		admin.HandleFunc("GET /admin/user/{connector}/{user}", s.handleAdminUserDetail)
+		admin.HandleFunc("POST /admin/connector/update", s.handleAdminUpdateConnector)
+		admin.HandleFunc("POST /admin/consent/revoke", s.handleAdminRevokeConsent)
+		admin.HandleFunc("POST /admin/webauthn/delete", s.handleAdminDeleteWebAuthn)
+		admin.HandleFunc("POST /admin/mfa/reset", s.handleAdminResetMFA)
+		admin.HandleFunc("POST /admin/mfa/secret/delete", s.handleAdminDeleteMFASecret)
+		admin.HandleFunc("POST /admin/refresh/revoke", s.handleAdminRevokeRefresh)
 	}
+	gate := s.dexuserGate(admin)
+	mux.Handle("/admin", gate)
+	mux.Handle("/admin/", gate)
 
 	return mux
 }

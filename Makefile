@@ -14,7 +14,7 @@ VERSION  ?= $(shell ./scripts/git-version)
 
 
 export GOBIN=$(PWD)/bin
-LD_FLAGS="-w -X main.version=$(VERSION)"
+LD_FLAGS="-w -X github.com/dexidp/dex/version.Version=$(VERSION)"
 
 # Dependency versions
 GOLANGCI_VERSION   = 2.15.0
@@ -36,7 +36,7 @@ build: bin/dex ## Build Dex binaries.
 examples: bin/grpc-client bin/example-app ## Build example app.
 
 .PHONY: release-binary
-release-binary: LD_FLAGS = "-w -X main.version=$(VERSION) -extldflags \"-static\""
+release-binary: LD_FLAGS = "-w -X github.com/dexidp/dex/version.Version=$(VERSION) -extldflags \"-static\""
 release-binary: ## Build release binaries (used to build a final container image).
 	@go build -o /go/bin/dex -v -ldflags $(LD_FLAGS) $(REPO_PATH)/cmd/dex
 	@go build -o /go/bin/docker-entrypoint -v -ldflags $(LD_FLAGS) $(REPO_PATH)/cmd/docker-entrypoint

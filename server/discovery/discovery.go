@@ -59,6 +59,7 @@ type Document struct {
 	UserInfo       string `json:"userinfo_endpoint"`
 	DeviceEndpoint string `json:"device_authorization_endpoint"`
 	Introspect     string `json:"introspection_endpoint"`
+	Revocation     string `json:"revocation_endpoint"`
 	EndSession     string `json:"end_session_endpoint,omitempty"`
 	// BackchannelLogout and BackchannelLogoutSession advertise OIDC Back-Channel
 	// Logout 1.0. Both are omitted rather than sent as false when sessions are off,
@@ -175,6 +176,7 @@ func (h *Handler) construct(ctx context.Context) (Document, error) {
 		UserInfo:          h.IssuerURL.AbsURL("/userinfo"),
 		DeviceEndpoint:    h.IssuerURL.AbsURL("/device/code"),
 		Introspect:        h.IssuerURL.AbsURL("/token/introspect"),
+		Revocation:        h.IssuerURL.AbsURL("/auth/revoke"),
 		Subjects:          []string{"public"},
 		IDTokenAlgs:       []string{string(jose.RS256)},
 		CodeChallengeAlgs: h.PKCEMethods,

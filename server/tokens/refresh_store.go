@@ -336,6 +336,31 @@ func (rt *RefreshStore) RevokeAll(ctx context.Context, userID, connectorID strin
 	rt.revoke(ctx, userID, connectorID, func(string) bool { return true })
 }
 
+// RevokeRefreshTokenFamily revokes the token family the given row belongs to.
+// A family — the originally issued token and every value it rotated through —
+// is a single row plus its offline-session reference, so revoking deletes
+// both (OAuth Security BCP reuse detection). Other clients under the session
+// are separate families and survive. Best-effort like the store's own revoke
+// paths, and all storage access stays at the top level, outside any updater
+// (the lock-order rule Rotate follows).
+func RevokeRefreshTokenFamily(ctx context.Context, s storage.Storage, logger *slog.Logger, refresh *storage.RefreshToken) {
+	err := s.UpdateOfflineSessions(ctx, refresh.Claims.UserID, refresh.ConnectorID, func(old storage.OfflineSessions) (storage.OfflineSessions, error) {
+		if ref, ok := old.Refresh[refresh.ClientID]; ok && ref.ID == refresh.ID {
+			delete(old.Refresh, refresh.ClientID)
+		}
+		return old, nil
+	})
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		// A standalone token may have no offline session at all; that is not a
+		// failure, the row below is what carries the family.
+		logger.ErrorContext(ctx, "failed to drop offline-session reference during reuse revocation", "err", err)
+	}
+
+	if err := s.DeleteRefresh(ctx, refresh.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		logger.ErrorContext(ctx, "failed to delete refresh token during reuse revocation", "token_id", refresh.ID, "err", err)
+	}
+}
+
 // revoke deletes the refresh tokens of every client matching the predicate and
 // clears their references in the offline session, keeping the session object.
 // Errors are logged but not returned: revocation is best-effort.
